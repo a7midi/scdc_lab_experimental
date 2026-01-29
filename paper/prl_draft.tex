@@ -1,0 +1,138 @@
+\documentclass[aps,prl,reprint,onecolumn]{revtex4-2}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\begin{document}
+
+\title{Transport, Localization, and Waveguiding in Schedule-Consistent Causal Graphs}
+
+\author{A. Alayyar}
+\affiliation{Independent Research}
+
+\date{\today}
+
+\begin{abstract}
+We study discrete dynamics on random layered directed acyclic graphs (DAGs) subject to a
+\emph{schedule-consistency} constraint: local ``diamond'' subgraphs must evolve to the same state under all
+\emph{admissible} update orders. Enforcing this constraint via a Schedule-Consistent Diamond Closure (SCDC)
+produces a disordered causal medium with robust, order-independent evolution. Scanning the forward-edge
+density reveals three transport regimes for injected excitations—extinction, localization, and runaway
+growth—characterized by the horizon-limited light-cone volume. In a separate ``radiation'' experiment, dense
+local motifs act as waveguides that amplify detector flux by orders of magnitude without changing causal
+reachability. These results show that conduction channels and localized quasi-particle-like pockets can
+emerge from geometric constraints in a random causal substrate, without hand-engineering propagating
+patterns.
+\end{abstract}
+
+\maketitle
+
+\paragraph{Motivation.}
+Discrete causal structures have been explored as candidates for microscopic spacetime
+\cite{bombelli1987}. A recurring difficulty is ensuring that dynamics is well-defined despite local freedom
+in update order: in a DAG, many vertices are spacelike-separated and can be updated in either order.
+Physical evolution should not depend on arbitrary scheduling choices. In rewriting theory, this motivates
+\emph{confluence}: different reduction orders lead to the same normal form. Here we impose an analogous
+principle on causal graphs by enforcing local order-independence on schedule-free diamonds, and then ask:
+\emph{What kinds of transport and emergent excitations arise in the resulting disordered medium?}
+
+\paragraph{Model.}
+We generate a layered DAG with $L$ layers and $N$ nodes total. Edges point forward in layer index.
+A forward-edge probability $p_f$ controls the density of local causal links; optional skip edges
+($p_{2},p_{3}$) connect across two or three layers.
+Binary activity evolves by a local rule (threshold or XOR) under synchronous updates.
+
+\emph{Schedule-consistency.}
+A diamond is a pattern $x\!\to\! y$, $x\!\to\! z$, $y\!\to\! w$, $z\!\to\! w$. If $y$ and $z$ are causally independent
+(neither reaches the other), then both update orders $(y \rightarrow z)$ and $(z \rightarrow y)$ are admissible.
+SCDC enforces that these admissible orders yield identical outcomes at $w$.
+(We explicitly exclude ``diamonds'' where $y$ reaches $z$ or $z$ reaches $y$, where one of the orders is anti-causal.)
+The resulting closure produces dynamics that is robust to update-order freedom, while preserving causal structure.
+
+\paragraph{H0: Transport regimes vs density.}
+To quantify transport, we inject activity at $n_s=8$ random sources and evolve for $t_{\max}=8$.
+For each source we record the \emph{horizon-limited light-cone volume}
+\begin{equation}
+V_h \equiv |A(t_{\max})| ,
+\end{equation}
+the number of active nodes at the final tick within the future cone.
+
+We classify each source into one of three coarse regimes:
+\begin{enumerate}
+\item \textbf{dead}: $V_h < 5$ (extinction),
+\item \textbf{localized}: $5 \le V_h \le 20$ (confined propagation),
+\item \textbf{shockwave}: $V_h > 20$ (runaway growth).
+\end{enumerate}
+Figure~\ref{fig:regimes} shows the fraction of sources in each regime as a function of $p_f$
+(pooled across 5 seeds; $N=40$ sources per density point in our default scan).
+The response is non-monotonic: intermediate densities produce the largest fraction of shockwave events,
+while both low and high densities favor extinction or confinement.
+This resembles transport in disordered media where conduction depends on the availability of connected
+channels \cite{stauffer1994,newman2018}.
+
+\begin{figure}
+\includegraphics[width=\linewidth]{../results/fig_transport_regimes.png}
+\caption{Transport regimes vs forward-edge density $p_f$ using the horizon-limited volume $V_h$.
+Fractions are computed over injected sources (8 per run) pooled across 5 seeds per density.
+A non-monotonic response is observed: runaway ``shockwave'' events are most frequent near intermediate $p_f$,
+while extinction dominates at low and high $p_f$.}
+\label{fig:regimes}
+\end{figure}
+
+\paragraph{Critical spectrum: rare large cones at $p_f=0.12$.}
+To compare two densities within the scan, Fig.~\ref{fig:spectrum} plots the distribution of $V_h$ at
+$p_f=0.12$ and $p_f=0.14$ (40 sources each). While both densities exhibit many small outcomes ($V_h \sim 1$--4),
+$p_f=0.12$ supports rare large events ($V_h \gtrsim 20$) that are absent at $p_f=0.14$ for the same thresholds.
+This indicates that geometric constraints can suppress a continuum of intermediate excitations and instead
+favor either rapid decay or occasional extended bursts—an effect reminiscent of disorder-induced spectral
+structure \cite{anderson1958}.
+
+\begin{figure}
+\includegraphics[width=\linewidth]{../results/fig_volume_spectrum_pf012_pf014.png}
+\caption{Horizon-limited volume spectrum at $p_f=0.12$ vs $p_f=0.14$ (log scale).
+Each point is one injected source ($N=40$ per density). The $p_f=0.12$ case supports rare large light-cones
+above the shockwave threshold ($V_h > 20$), while $p_f=0.14$ remains confined to smaller outcomes for the
+same protocol.}
+\label{fig:spectrum}
+\end{figure}
+
+\paragraph{H1: Dense motifs as waveguides (radiation experiment).}
+We next test whether localized dense subgraphs can act as \emph{conduction filaments} that guide propagation.
+In a separate layered-DAG setup, we place a small set of ``knot'' nodes near the source layer and vary only
+their internal wiring density. We then excite a fixed initial state and record the detector-layer flux
+$\Phi(t)$ (the number of active detector nodes) as a function of time.
+
+Figure~\ref{fig:h1} compares a dense knot ($p_{\mathrm{knot}}=0.9$) to the same knot nodes with no internal
+knot wiring ($p_{\mathrm{knot}}=0.0$). The detector is reached at the same first-arrival time in both cases,
+consistent with identical topological reachability. However, the dense knot amplifies the \emph{integrated}
+detector flux by orders of magnitude (in our representative run, $\sum_t \Phi(t)$ increases by $\sim 10^2$),
+indicating that local motif density can strongly focus/guide activity without altering causal accessibility.
+This supports a ``filament'' picture in which the geometry creates effective highways for energy transport.
+
+\begin{figure}
+\includegraphics[width=\linewidth]{../results/fig_h1_detector_flux.png}
+\caption{H1 radiation experiment: detector flux $\Phi(t)$ with and without dense internal wiring among the same
+knot nodes. Both cases reach the detector at the same first-arrival tick, but the dense knot produces orders-of-magnitude
+higher detector flux, consistent with waveguiding/focusing by local motifs.}
+\label{fig:h1}
+\end{figure}
+
+\paragraph{Discussion.}
+A common approach to propagating patterns in discrete dynamics is to search for rule-engineered ``gliders''
+(as in cellular automata). Our results emphasize a complementary mechanism: \emph{geometry-first transport}.
+In SCDC-enforced causal DAGs, propagation can become confined to sparse high-conductance subgraphs
+(``filaments''), and localized moving patterns arise naturally when activity enters such channels.
+The transport scan (H0) maps where the medium is insulating, localizing, or unstable, while the radiation
+experiment (H1) shows that dense motifs can function as waveguides that amplify signal transmission.
+Together, these experiments suggest that quasi-particle-like pockets and guided transport can emerge
+from purely combinatorial constraints in random causal substrates.
+
+\paragraph{Reproducibility.}
+All figures and CSVs in this letter are generated by the scripts included with this submission.
+Key parameters (graph size, layer count, densities, thresholds, seeds) are explicitly specified in the
+repository README, along with one-command reproduction of each figure.
+
+\bibliography{refs}
+
+\end{document}
