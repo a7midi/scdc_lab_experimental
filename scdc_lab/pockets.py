@@ -89,16 +89,13 @@ def predecessor_closure(world: WorldInstance, S: Set[int]) -> Set[int]:
 
 
 def force_operator(world: WorldInstance, S: Set[int], ess: EssentialInputs) -> Set[int]:
-    """Force(S) = {v: EssIn(v) ⊆ PredCl(S)} with a non-vacuity guard.
-
-    If EssIn(v) is empty, the subset condition is vacuously true. Forcing such vertices
-    causes pathological 'everything gets forced' pockets. We therefore require EssIn(v)
-    to be non-empty for forcing.
-    """
+    """Force(S) = {v: all essential input sources of v lie in PredCl(S)}."""
     predcl = predecessor_closure(world, S)
-    forced: Set[int] = set()
+    forced = set()
     for v in world.G.nodes():
         srcs = ess.ess_sources.get(v, set())
+        # IMPORTANT: ignore vertices with no essential inputs; otherwise empty EssIn forces everything
+        # into every closure trivially.
         if srcs and srcs.issubset(predcl):
             forced.add(v)
     return forced
@@ -121,14 +118,9 @@ def is_connected_undirected(world: WorldInstance, nodes: Set[int]) -> bool:
         return False
     UG = nx.Graph()
     UG.add_nodes_from(nodes)
-    if isinstance(world.G, nx.MultiDiGraph):
-        for u, v, _k in world.G.edges(keys=True):
-            if u in nodes and v in nodes:
-                UG.add_edge(u, v)
-    else:
-        for u, v in world.G.edges():
-            if u in nodes and v in nodes:
-                UG.add_edge(u, v)
+    for u, v, _k in world.G.edges(keys=True):
+        if u in nodes and v in nodes:
+            UG.add_edge(u, v)
     return nx.is_connected(UG)
 
 
@@ -149,14 +141,9 @@ def pockets_from_active_set(world: WorldInstance, active: Set[int], ess: Essenti
     # Split into connected components (undirected)
     UG = nx.Graph()
     UG.add_nodes_from(P)
-    if isinstance(world.G, nx.MultiDiGraph):
-        for u, v, _k in world.G.edges(keys=True):
-            if u in P and v in P:
-                UG.add_edge(u, v)
-    else:
-        for u, v in world.G.edges():
-            if u in P and v in P:
-                UG.add_edge(u, v)
+    for u, v, _k in world.G.edges(keys=True):
+        if u in P and v in P:
+            UG.add_edge(u, v)
     comps = [set(c) for c in nx.connected_components(UG)]
     # Ensure each is closed (take closure component-wise)
     pockets = []

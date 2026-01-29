@@ -1,182 +1,196 @@
-
+#!/usr/bin/env python3
 """
-H1 CSV analysis utility.
+H1 CSV Analyzer
 
-This reads the CSV emitted by h1_glider_search (or similar) and reports:
-- pocket/active size statistics
-- centroid drift slopes after a burn-in
-- Jaccard stability statistics
+This script is tolerant of two CSV schemas:
 
-IMPORTANT FIX:
-Earlier versions incorrectly called "percolated" whenever the pocket rapidly stabilized
-relative to its own maximum. That is not "near-global". This version only calls
-percolation/localization if you provide --n_total (the total number of vertices).
+Schema A (glider_search / pocket-tracking):
+    t, active_size, active_centroid_depth,
+    pocket_size, pocket_centroid_depth,
+    jaccard_prev, active_jaccard_prev
+
+Schema B (radiation_search / detector-tracking):
+    t, active_size, active_centroid_depth,
+    active_max_depth, active_p95_depth,
+    detector_count, detector_ge_count,
+    active_jaccard_prev
 """
-
 from __future__ import annotations
 
 import argparse
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
 
-def _robust_median(x: np.ndarray) -> float:
-    x = x[np.isfinite(x)]
-    if x.size == 0:
-        return float("nan")
-    return float(np.median(x))
-
-
-def _first_tick_at_or_above(t: np.ndarray, y: np.ndarray, thr: float) -> Optional[int]:
-    mask = np.isfinite(y) & (y >= thr)
-    if not np.any(mask):
-        return None
-    return int(t[np.where(mask)[0][0]])
-
-
-def _linreg_slope(t: np.ndarray, y: np.ndarray) -> float:
-    """Slope of y ~ a + b t using least squares (b returned)."""
-    mask = np.isfinite(t) & np.isfinite(y)
-    t = t[mask]
+def _linreg_slope(x: Sequence[float], y: Sequence[float]) -> float:
+    """Return slope of y ~ a + b x. If ill-posed, return 0."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 2:
+        return 0.0
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
     y = y[mask]
-    if t.size < 2:
-        return float("nan")
-    t0 = t - t.mean()
-    denom = float(np.dot(t0, t0))
-    if denom <= 0:
-        return float("nan")
-    b = float(np.dot(t0, y - y.mean()) / denom)
-    return b
+    if len(x) < 2:
+        return 0.0
+    if np.allclose(x, x[0]):
+        return 0.0
+    b = np.polyfit(x, y, 1)[0]
+    return float(b)
+
+
+def _series_stats(a: pd.Series) -> tuple[float, float, float]:
+    a2 = pd.to_numeric(a, errors="coerce")
+    return float(a2.min()), float(a2.median()), float(a2.max())
+
+
+def _jaccard_stats(a: pd.Series) -> tuple[float, float, float]:
+    a2 = pd.to_numeric(a, errors="coerce").dropna()
+    if len(a2) == 0:
+        return float("nan"), float("nan"), float("nan")
+    return float(a2.median()), float(a2.min()), float(a2.iloc[-1])
 
 
 @dataclass
 class Verdict:
     label: str
-    details: str
+    reason: str
 
 
-def classify_pocket(
-    pocket_median: float,
-    pocket_max: float,
-    n_total: Optional[int],
-    percolation_frac: float,
-    localized_frac: float,
-) -> Verdict:
-    """
-    Classification by *fraction of the total vertex set*.
+def _localization_verdict(frac_median: float, frac_max: float) -> Verdict:
+    if math.isfinite(frac_median) and frac_median >= 0.60:
+        return Verdict("Percolated", f"median fraction={frac_median:.3f} >= 0.600")
+    if math.isfinite(frac_max) and frac_max <= 0.30:
+        return Verdict("Localized", f"max fraction={frac_max:.3f} <= 0.300")
+    return Verdict("Ambiguous", f"median={frac_median:.3f}, max={frac_max:.3f}")
 
-    - Percolated: median pocket fraction >= percolation_frac
-    - Localized:  max pocket fraction <= localized_frac
-    - Mesoscopic: otherwise
-    """
-    if n_total is None or n_total <= 0:
-        return Verdict(
-            "Unknown",
-            "Pass --n_total to classify percolation/localization by fraction of total vertices.",
-        )
-    frac_med = pocket_median / float(n_total)
-    frac_max = pocket_max / float(n_total)
 
-    if frac_med >= percolation_frac:
-        return Verdict(
-            "Percolated",
-            f"median pocket fraction={frac_med:.3f} >= {percolation_frac:.3f}",
-        )
-    if frac_max <= localized_frac:
-        return Verdict(
-            "Localized",
-            f"max pocket fraction={frac_max:.3f} <= {localized_frac:.3f}",
-        )
-    return Verdict(
-        "Mesoscopic",
-        f"median fraction={frac_med:.3f}, max fraction={frac_max:.3f} (between thresholds)",
+def analyze_glider(df: pd.DataFrame, burn: int, n_total: Optional[int]) -> None:
+    print("=== H1 CSV Analysis (pocket tracking) ===")
+    print(f"Rows: {len(df)}  (ticks {int(df['t'].min())}..{int(df['t'].max())})")
+
+    pmin, pmed, pmax = _series_stats(df["pocket_size"])
+    amin, amed, amax = _series_stats(df["active_size"])
+    print(f"Pocket size: min={pmin:.0f}  median={pmed:.1f}  max={pmax:.0f}")
+    print(f"Active size:  min={amin:.0f}  median={amed:.1f}  max={amax:.0f}")
+
+    if n_total is not None:
+        pocket_frac = df["pocket_size"] / float(n_total)
+        active_frac = df["active_size"] / float(n_total)
+        pf_med = float(pd.to_numeric(pocket_frac, errors="coerce").median())
+        pf_max = float(pd.to_numeric(pocket_frac, errors="coerce").max())
+        af_med = float(pd.to_numeric(active_frac, errors="coerce").median())
+        af_max = float(pd.to_numeric(active_frac, errors="coerce").max())
+        print(f"n_total: {n_total}")
+        print(f"Pocket fraction: median={pf_med:.3f} max={pf_max:.3f}")
+        print(f"Active fraction: median={af_med:.3f} max={af_max:.3f}")
+
+    # Stabilization tick
+    thr = 0.95 * pmax
+    stab = df.loc[df["pocket_size"] >= thr, "t"]
+    stab_tick = int(stab.iloc[0]) if len(stab) else None
+    print(f"Stabilization tick (>= 0.95*max): {stab_tick}")
+
+    # Centroid drift
+    print(
+        f"Pocket centroid depth: start={float(df['pocket_centroid_depth'].iloc[0]):.3f}  "
+        f"end={float(df['pocket_centroid_depth'].iloc[-1]):.3f}"
     )
+    df_burn = df[df["t"] >= burn].copy()
+    pocket_slope = _linreg_slope(df_burn["t"], df_burn["pocket_centroid_depth"])
+    active_slope = _linreg_slope(df_burn["t"], df_burn["active_centroid_depth"])
+    print(
+        f"Drift slope after burn={burn}: pocket_slope={pocket_slope:.6g} depth/tick  "
+        f"active_slope={active_slope:.6g} depth/tick"
+    )
+
+    # Jaccard
+    j_med, j_min, j_last = _jaccard_stats(df.get("jaccard_prev", pd.Series(dtype=float)))
+    aj_med, aj_min, aj_last = _jaccard_stats(df.get("active_jaccard_prev", pd.Series(dtype=float)))
+    print(f"Jaccard(prev): pocket median={j_med:.3f} min={j_min:.3f} last={j_last:.3f}")
+    print(f"Jaccard(prev): active  median={aj_med:.3f} min={aj_min:.3f} last={aj_last:.3f}")
+
+    if len(df_burn) > 0:
+        j2_med, j2_min, _ = _jaccard_stats(df_burn.get("jaccard_prev", pd.Series(dtype=float)))
+        aj2_med, aj2_min, _ = _jaccard_stats(df_burn.get("active_jaccard_prev", pd.Series(dtype=float)))
+        print(f"Jaccard(prev) after burn: pocket median={j2_med:.3f} min={j2_min:.3f}")
+        print(f"Jaccard(prev) after burn: active  median={aj2_med:.3f} min={aj2_min:.3f}")
+
+    if n_total is not None:
+        pocket_frac = df["pocket_size"] / float(n_total)
+        vf = _localization_verdict(float(pocket_frac.median()), float(pocket_frac.max()))
+        print(f"Verdict: {vf.label}. {vf.reason}")
+    else:
+        print("Verdict: (skipped) Provide --n_total for a localization verdict.")
+
+
+def analyze_radiation(df: pd.DataFrame, burn: int, n_total: Optional[int]) -> None:
+    print("=== H1 CSV Analysis (radiation / detector) ===")
+    print(f"Rows: {len(df)}  (ticks {int(df['t'].min())}..{int(df['t'].max())})")
+
+    amin, amed, amax = _series_stats(df["active_size"])
+    print(f"Active size: min={amin:.0f}  median={amed:.1f}  max={amax:.0f}")
+
+    if n_total is not None:
+        active_frac = df["active_size"] / float(n_total)
+        af_med = float(pd.to_numeric(active_frac, errors="coerce").median())
+        af_max = float(pd.to_numeric(active_frac, errors="coerce").max())
+        print(f"n_total: {n_total}")
+        print(f"Active fraction: median={af_med:.3f} max={af_max:.3f}")
+        vf = _localization_verdict(af_med, af_max)
+        print(f"Verdict: {vf.label}. {vf.reason}")
+
+    # Depth / propagation
+    if "active_max_depth" in df.columns:
+        dmax = int(pd.to_numeric(df["active_max_depth"], errors="coerce").max())
+        print(f"Max active depth seen: {dmax}")
+    if "active_p95_depth" in df.columns:
+        p95_end = float(pd.to_numeric(df["active_p95_depth"], errors="coerce").iloc[-1])
+        print(f"Active p95 depth (final): {p95_end:.3f}")
+
+    # Detector
+    if "detector_count" in df.columns:
+        hit = df.index[pd.to_numeric(df["detector_count"], errors="coerce").fillna(0) > 0]
+        first_hit = int(df.loc[hit[0], "t"]) if len(hit) else None
+        total_hits = int(pd.to_numeric(df["detector_count"], errors="coerce").fillna(0).sum())
+        print(f"Detector: first_hit_tick={first_hit}  total_hits={total_hits}")
+
+    # Drift
+    df_burn = df[df["t"] >= burn].copy()
+    active_slope = _linreg_slope(df_burn["t"], df_burn["active_centroid_depth"])
+    print(f"Drift slope after burn={burn}: active_slope={active_slope:.6g} depth/tick")
+
+    # Jaccard
+    aj_med, aj_min, aj_last = _jaccard_stats(df.get("active_jaccard_prev", pd.Series(dtype=float)))
+    print(f"Jaccard(prev): active median={aj_med:.3f} min={aj_min:.3f} last={aj_last:.3f}")
+    if len(df_burn) > 0:
+        aj2_med, aj2_min, _ = _jaccard_stats(df_burn.get("active_jaccard_prev", pd.Series(dtype=float)))
+        print(f"Jaccard(prev) after burn: active median={aj2_med:.3f} min={aj2_min:.3f}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("csv", help="CSV file from h1_glider_search (columns: t, active_size, ...)")
-    ap.add_argument("--burn", type=int, default=20, help="Burn-in ticks to drop before drift slope fit.")
-    ap.add_argument("--n_total", type=int, default=None, help="Total number of vertices (n). Enables percolation/localization verdict.")
-    ap.add_argument("--percolation_frac", type=float, default=0.60, help="Median pocket fraction threshold for percolation.")
-    ap.add_argument("--localized_frac", type=float, default=0.30, help="Max pocket fraction threshold for localization.")
+    ap.add_argument("csv_path", help="CSV produced by h1_glider_search or h1_radiation_search")
+    ap.add_argument("--burn", type=int, default=20, help="burn-in ticks to ignore for drift/jaccard summaries")
+    ap.add_argument("--n_total", type=int, default=None, help="total number of nodes (enables fraction-based verdicts)")
     args = ap.parse_args()
 
-    df = pd.read_csv(args.csv)
-    required = ["t", "active_size", "active_centroid_depth", "pocket_size", "pocket_centroid_depth", "jaccard_prev", "active_jaccard_prev"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise SystemExit(f"Missing required columns: {missing}. Got columns: {list(df.columns)}")
+    df = pd.read_csv(args.csv_path)
+    if "t" not in df.columns:
+        raise SystemExit("CSV missing required column: t")
 
-    t = df["t"].to_numpy(dtype=float)
-    pocket = df["pocket_size"].to_numpy(dtype=float)
-    active = df["active_size"].to_numpy(dtype=float)
+    if "pocket_size" in df.columns and "pocket_centroid_depth" in df.columns:
+        analyze_glider(df, burn=int(args.burn), n_total=args.n_total)
+        return
+    if "active_max_depth" in df.columns or "detector_count" in df.columns:
+        analyze_radiation(df, burn=int(args.burn), n_total=args.n_total)
+        return
 
-    pocket_cent = df["pocket_centroid_depth"].to_numpy(dtype=float)
-    active_cent = df["active_centroid_depth"].to_numpy(dtype=float)
-
-    j_pocket = df["jaccard_prev"].to_numpy(dtype=float)
-    j_active = df["active_jaccard_prev"].to_numpy(dtype=float)
-
-    pocket_nonzero = int(np.sum(np.isfinite(pocket) & (pocket > 0)))
-    rows = int(df.shape[0])
-
-    pocket_min = float(np.nanmin(pocket))
-    pocket_med = float(np.nanmedian(pocket))
-    pocket_max = float(np.nanmax(pocket))
-
-    stab_tick = _first_tick_at_or_above(t, pocket, 0.95 * pocket_max)
-
-    # Drift slopes after burn
-    burn = int(max(0, args.burn))
-    mask_burn = t >= burn
-    pocket_slope = _linreg_slope(t[mask_burn], pocket_cent[mask_burn])
-    active_slope = _linreg_slope(t[mask_burn], active_cent[mask_burn])
-
-    # Jaccards
-    j_pocket_med = _robust_median(j_pocket)
-    j_active_med = _robust_median(j_active)
-    j_pocket_min = float(np.nanmin(j_pocket[np.isfinite(j_pocket)])) if np.any(np.isfinite(j_pocket)) else float("nan")
-    j_active_min = float(np.nanmin(j_active[np.isfinite(j_active)])) if np.any(np.isfinite(j_active)) else float("nan")
-    j_pocket_last = float(j_pocket[np.where(np.isfinite(j_pocket))[0][-1]]) if np.any(np.isfinite(j_pocket)) else float("nan")
-    j_active_last = float(j_active[np.where(np.isfinite(j_active))[0][-1]]) if np.any(np.isfinite(j_active)) else float("nan")
-
-    # Jaccards after burn
-    j_pocket_med_burn = _robust_median(j_pocket[mask_burn])
-    j_active_med_burn = _robust_median(j_active[mask_burn])
-    j_pocket_min_burn = float(np.nanmin(j_pocket[mask_burn][np.isfinite(j_pocket[mask_burn])])) if np.any(np.isfinite(j_pocket[mask_burn])) else float("nan")
-    j_active_min_burn = float(np.nanmin(j_active[mask_burn][np.isfinite(j_active[mask_burn])])) if np.any(np.isfinite(j_active[mask_burn])) else float("nan")
-
-    verdict = classify_pocket(
-        pocket_median=pocket_med,
-        pocket_max=pocket_max,
-        n_total=args.n_total,
-        percolation_frac=float(args.percolation_frac),
-        localized_frac=float(args.localized_frac),
-    )
-
-    # Pretty print
-    print("=== H1 CSV Analysis ===")
-    print(f"Rows: {rows}  (ticks {int(np.nanmin(t))}..{int(np.nanmax(t))})")
-    if args.n_total is not None:
-        print(f"n_total: {int(args.n_total)}")
-        print(f"Pocket fraction: median={pocket_med/args.n_total:.3f} max={pocket_max/args.n_total:.3f}")
-        print(f"Active fraction: median={float(np.nanmedian(active))/args.n_total:.3f} max={float(np.nanmax(active))/args.n_total:.3f}")
-
-    print(f"Pocket size: min={pocket_min:.0f}  median={pocket_med:.1f}  max={pocket_max:.0f}")
-    print(f"Stabilization tick (>= 0.95*max): {stab_tick}")
-    print(f"Pocket centroid depth: start={float(pocket_cent[0]):.3f}  end={float(pocket_cent[-1]):.3f}")
-    print(f"Drift slope after burn={burn}: pocket_slope={pocket_slope:.6g} depth/tick  active_slope={active_slope:.6g} depth/tick")
-    print(f"Jaccard(prev): pocket median={j_pocket_med:.3f} min={j_pocket_min:.3f} last={j_pocket_last:.3f}")
-    print(f"Jaccard(prev): active median={j_active_med:.3f} min={j_active_min:.3f} last={j_active_last:.3f}")
-    print(f"Jaccard(prev) after burn: pocket median={j_pocket_med_burn:.3f} min={j_pocket_min_burn:.3f}")
-    print(f"Jaccard(prev) after burn: active median={j_active_med_burn:.3f} min={j_active_min_burn:.3f}")
-
-    print(f"Verdict: {verdict.label}. {verdict.details}")
+    raise SystemExit(f"Unrecognized CSV schema. Columns: {list(df.columns)}")
 
 
 if __name__ == "__main__":

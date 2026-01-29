@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Set
 
 import itertools
 import numpy as np
@@ -13,7 +13,7 @@ from .world import WorldInstance, LocalRule, LookupTableRule
 
 
 class LazyQuotientRule(LocalRule):
-    """On-demand quotient rule \bar\lambda_v.
+    r"""On-demand quotient rule \bar\lambda_v.
 
     We avoid enumerating the full quotient input space Π_e |\bar A_{s(e)}|, which can explode.
     """
@@ -172,20 +172,40 @@ def star_equivariance_closure(world: WorldInstance, profile: Dict[int, Partition
 
 
 def _find_diamonds(cond_dag: nx.DiGraph, depth: Dict[int, int]) -> List[Tuple[int, int, int, int]]:
-    """Find diamond patterns x -> y, x -> z, and y -> w, z -> w in condensation DAG."""
+    """Find diamond patterns x->y, x->z, y->w, z->w in the condensation DAG.
+
+    Important: We only enforce confluence on *schedule-free* diamonds where the two middle
+    vertices (y,z) are causally independent (neither can reach the other). If y reaches z
+    (or vice versa), then the update order is physically fixed by causality and should not
+    be treated as a commutation constraint.
+    """
     diamonds: List[Tuple[int, int, int, int]] = []
-    # small graphs: brute
+
+    # Cache descendant sets to avoid repeated traversals (graphs here are small).
+    _desc_cache: Dict[int, Set[int]] = {}
+
+    def _desc(u: int) -> Set[int]:
+        if u not in _desc_cache:
+            _desc_cache[u] = set(nx.descendants(cond_dag, u))
+        return _desc_cache[u]
+
     for x in cond_dag.nodes():
         succ = list(cond_dag.successors(x))
         for i in range(len(succ)):
             for j in range(i + 1, len(succ)):
                 y, z = succ[i], succ[j]
+
+                # Skip "diamonds" where y and z are comparable in the partial order.
+                # In that case, one of the two schedules is anti-causal.
+                if (z in _desc(y)) or (y in _desc(z)):
+                    continue
+
                 succ_y = set(cond_dag.successors(y))
                 succ_z = set(cond_dag.successors(z))
                 for w in succ_y.intersection(succ_z):
                     diamonds.append((x, y, z, w))
-    return diamonds
 
+    return diamonds
 
 def diamond_confluence_closure(world: WorldInstance, profile: Dict[int, Partition], cfg: SCDCConfig) -> Dict[int, Partition]:
     """Sampling-based closure for diamond confluence.
@@ -296,8 +316,21 @@ def quotient_loss(world: WorldInstance, profile: Dict[int, Partition]) -> float:
     return float(num / max(1.0, den))
 
 
-def quotient_world(world: WorldInstance, profile: Dict[int, Partition], cache_limit: int = 200_000) -> WorldInstance:
-    """Construct the quotient world \bar W = W / \Lambda with lazy quotient rules."""
+def quotient_world(
+    world: WorldInstance,
+    profile: Dict[int, Partition],
+    cache_limit: int = 200_000,
+    *,
+    max_precompute_tuples_per_vertex: int | None = None,
+    lazy_cache_limit: int | None = None,
+) -> WorldInstance:
+    r"""Construct the quotient world \bar W = W / \Lambda with lazy quotient rules."""
+    # Backwards-compatibility shims for older experiment scripts.
+    if lazy_cache_limit is not None:
+        cache_limit = int(lazy_cache_limit)
+    # max_precompute_tuples_per_vertex was used by earlier prototypes; it is currently ignored.
+    _ = max_precompute_tuples_per_vertex
+
     q_maps = {v: profile[v].canonical_label_map() for v in world.G.nodes()}
 
     # representatives for each quotient class (choose min element in class)

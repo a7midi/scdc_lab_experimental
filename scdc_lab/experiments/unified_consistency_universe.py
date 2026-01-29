@@ -383,8 +383,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--r_cone", type=int, default=1)
 
     # matter injection
-    p.add_argument("--inject_knot_k", type=int, default=0)
-    p.add_argument("--knot_p", type=float, default=0.9)
+    p.add_argument("--inject_knot_k", "--knot_k", dest="inject_knot_k", type=int, default=0, help="Inject a knot of size K after Genesis (alias: --knot_k).")
+    p.add_argument("--knot_p", "--knot_density", dest="knot_p", type=float, default=0.9, help="Internal edge probability for knot (alias: --knot_density).")
     p.add_argument("--knot_parallel", type=int, default=3)
     p.add_argument("--steps", type=int, default=80, help="Simulation steps for matter run.")
 
@@ -394,7 +394,7 @@ def build_argparser() -> argparse.ArgumentParser:
     # io
     p.add_argument("--out_prefix", type=str, default="universe")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out_json", type=str, default="universe_summary.json")
+    p.add_argument("--out_json", type=str, default=None, help="Output JSON summary path (default: <out_prefix>_summary.json)")
 
     return p
 
@@ -402,6 +402,10 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_argparser()
     args = parser.parse_args()
+    # Default JSON output: keep each run's summary separate by prefix.
+    if args.out_json is None:
+        args.out_json = str(args.out_prefix) + "_summary.json"
+
     summary = run_pipeline(args)
 
     with open(args.out_json, "w", encoding="utf-8") as f:

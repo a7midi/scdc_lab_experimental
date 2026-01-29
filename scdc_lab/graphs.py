@@ -42,13 +42,9 @@ def layered_random_dag(
     p_forward: float,
     p_skip2: float = 0.0,
     p_skip3: float = 0.0,
-    p_skip: float | None = None,
+    p_skip: Optional[float] = None,  # alias for p_skip2
     seed: Optional[int] = None,
 ) -> nx.MultiDiGraph:
-    # Backward/alias compatibility
-    if p_skip is not None:
-        p_skip2 = p_skip
-    ...
     """Layered DAG for causal / glider-like experiments.
 
     Nodes are labeled by integer id = layer*layer_size + i.

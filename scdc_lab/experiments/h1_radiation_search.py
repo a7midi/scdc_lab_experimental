@@ -1,18 +1,20 @@
+
 """
-H1 radiation / pulse experiment with finite-speed option.
+H1 radiation / pulse experiment (time-semantics FIX).
 
-Why this exists:
-- schedule.tick_update in this codebase updates SCCs sequentially, so a signal can
-  propagate through many SCC layers within *one tick* (cascading within the sweep).
-- For "radiation" we want to test finite-speed propagation: every vertex updates
-  from the prior-tick state (global synchronous update).
+Problem this fixes:
+- schedule.tick_update() performs a *sequential* SCC sweep.
+- That allows activity to propagate arbitrarily far *within a single tick* along the DAG,
+  so "detector reached at tick 1" can happen even though no finite-speed propagation occurred.
 
-This script supports:
-  --update_mode synchronous   (default; finite-speed)
-  --update_mode sequential    (old behavior; SCC-sweep within tick)
+Solution:
+- Add --update_mode synchronous (default) where each tick is a *global synchronous* update:
+  x_{t+1}(v) = f_v( x_t(inputs) ) for all v, using the previous tick's state for ALL inputs.
+- Keep --update_mode sequential available for debugging (fast "circuit evaluation" semantics).
 
-It also performs a topology reachability check (ignoring dynamics) so you don't
-waste time on runs where the detector layer is unreachable.
+Also adds:
+- Smaller, configurable SCDC sampling defaults to avoid OOM ("Killed") on k>2 / random rules.
+- Smaller quotient precompute cap to reduce memory.
 
 CSV columns:
 t, active_size, active_centroid_depth, active_max_depth, active_p95_depth,
@@ -22,12 +24,11 @@ detector_count, detector_ge_count, active_jaccard_prev
 from __future__ import annotations
 
 import argparse
-import inspect
 from typing import Dict, List, Optional, Set, Tuple
 
-import networkx as nx
 import numpy as np
 import pandas as pd
+import networkx as nx
 
 from scdc_lab.graphs import layered_random_dag, inject_knot
 from scdc_lab.world import WorldInstance, ThresholdRule, XorRule, random_lookup_rule, LocalRule
@@ -71,22 +72,8 @@ def _reachability_summary(G: nx.MultiDiGraph, sources: List[int], layer_size: in
     return int(max_layer), bool(det_ok)
 
 
-def _quotient_world_compat(world: WorldInstance, profile: Dict[int, object], **kwargs) -> WorldInstance:
-    """Call quotient_world with only kwargs supported by the installed scdc_lab version."""
-    try:
-        sig = inspect.signature(quotient_world)
-        allowed = {}
-        for k, v in kwargs.items():
-            if k in sig.parameters:
-                allowed[k] = v
-        return quotient_world(world, profile, **allowed)
-    except TypeError:
-        # Old signature: quotient_world(world, profile)
-        return quotient_world(world, profile)
-
-
-def _tick_update_synchronous(world: WorldInstance, state_t: Dict[int, int]) -> Dict[int, int]:
-    """Global synchronous tick: x_{t+1}(v) depends only on x_t(u)."""
+def tick_update_synchronous(world: WorldInstance, state_t: Dict[int, int]) -> Dict[int, int]:
+    """Global synchronous update: all vertices read inputs from the *previous* tick state only."""
     old = state_t
     new: Dict[int, int] = {}
     for v in world.G.nodes():
@@ -111,13 +98,12 @@ def build_layered_world(
     p_internal: float = 0.9,
     add_back_edges: bool = True,
     use_scdc: bool = True,
-    scdc_max_iter: int = 50,
-    q_max_precompute: int = 65536,
-    q_lazy_cache: int = 200000,
+    scdc_iters: int = 12,
+    scdc_samples: int = 512,
+    scdc_diamond_samples: int = 32,
+    q_max_precompute: int = 4096,
+    q_lazy_cache: int = 50_000,
 ) -> Tuple[WorldInstance, List[int], int, nx.MultiDiGraph]:
-    """
-    Returns: (world, knot_nodes, layer_size, raw_graph)
-    """
     if layers <= 0:
         raise ValueError("--layers must be positive.")
     if n % layers != 0:
@@ -154,11 +140,14 @@ def build_layered_world(
     if not use_scdc:
         return base_world, knot_nodes, layer_size, G
 
-    cfg = SCDCConfig(max_iterations=int(scdc_max_iter), seed=int(seed))
-    profile = compute_lambda_star(base_world, cfg=cfg)
-
-    # These kwargs may or may not exist depending on your scdc_lab version.
-    qworld = _quotient_world_compat(
+    scdc_cfg = SCDCConfig(
+        seed=int(seed),
+        max_iterations=int(scdc_iters),
+        sample_tuples_per_vertex=int(scdc_samples),
+        max_diamond_state_samples=int(scdc_diamond_samples),
+    )
+    profile = compute_lambda_star(base_world, cfg=scdc_cfg)
+    qworld = quotient_world(
         base_world,
         profile,
         max_precompute_tuples_per_vertex=int(q_max_precompute),
@@ -176,9 +165,11 @@ def excite_state(world: WorldInstance, knot_nodes: List[int], *, mode: str, vacu
             x[v] = int(vacuum)
         else:
             if mode == "ones":
-                x[v] = 1
+                x[v] = 1 if kA > 1 else int(vacuum)
             elif mode == "random":
                 x[v] = int(rng.integers(0, kA))
+            elif mode == "vacuum":
+                x[v] = int(vacuum)
             else:
                 raise ValueError(f"Unknown excite mode: {mode}")
     return x
@@ -188,10 +179,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=800)
     ap.add_argument("--layers", type=int, default=40)
+    ap.add_argument("--graph_type", choices=["layered"], default="layered", help="(compat) Graph type; only layered is supported.")
     ap.add_argument("--p_forward", type=float, default=0.10)
     ap.add_argument("--p_skip", type=float, default=0.01)
     ap.add_argument("--knot_k", type=int, default=8)
     ap.add_argument("--knot_layer", type=int, default=2)
+    ap.add_argument("--knot_p", "--knot_density", dest="knot_p", type=float, default=0.9, help="Internal knot edge probability (alias: --knot_density).")
 
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--vacuum", type=int, default=0)
@@ -199,26 +192,26 @@ def main() -> None:
     ap.add_argument("--rule", choices=["xor", "threshold", "random"], default="xor")
     ap.add_argument("--threshold", type=int, default=2)
 
-    ap.add_argument("--update_mode", choices=["synchronous", "sequential"], default="synchronous")
-    ap.add_argument("--fixed_schedule", action="store_true", help="(Sequential mode) Use one fixed SCC schedule for all ticks.")
-    ap.add_argument("--steps", type=int, default=200)
+    ap.add_argument("--update_mode", choices=["synchronous", "sequential"], default="synchronous",
+                    help="synchronous=finite-speed (recommended), sequential=propagates within tick (debug).")
+    ap.add_argument("--fixed_schedule", action="store_true", help="Only used for sequential mode.")
+
+    ap.add_argument("--steps", type=int, default=600)
     ap.add_argument("--seed", type=int, default=1)
 
     ap.add_argument("--detector_layer", type=int, default=30)
-    ap.add_argument("--excite", choices=["ones", "random"], default="ones")
-
+    ap.add_argument("--excite", choices=["ones", "random", "vacuum"], default="ones")
     ap.add_argument("--kick_tick", type=int, default=-1)
     ap.add_argument("--kick_frac", type=float, default=0.25)
 
     ap.add_argument("--no_scdc", action="store_true")
-    ap.add_argument("--scdc_max_iter", type=int, default=50)
+    ap.add_argument("--scdc_iters", type=int, default=12)
+    ap.add_argument("--scdc_samples", type=int, default=512)
+    ap.add_argument("--scdc_diamond_samples", type=int, default=32)
+    ap.add_argument("--q_max_precompute", type=int, default=4096)
+    ap.add_argument("--q_lazy_cache", type=int, default=50_000)
 
-    # Optional quotient-map resource controls (used only if supported by quotient_world)
-    ap.add_argument("--q_max_precompute", type=int, default=65536)
-    ap.add_argument("--q_lazy_cache", type=int, default=200000)
-
-    ap.add_argument("--out_csv", type=str, default="h1_radiation.csv")
-
+    ap.add_argument("--out_csv", "--csv", dest="out_csv", type=str, default="h1_radiation.csv")
     args = ap.parse_args()
 
     world, knot_nodes, layer_size, rawG = build_layered_world(
@@ -233,8 +226,11 @@ def main() -> None:
         k=int(args.k),
         vacuum=int(args.vacuum),
         seed=int(args.seed),
+        p_internal=float(args.knot_p),
         use_scdc=(not args.no_scdc),
-        scdc_max_iter=int(args.scdc_max_iter),
+        scdc_iters=int(args.scdc_iters),
+        scdc_samples=int(args.scdc_samples),
+        scdc_diamond_samples=int(args.scdc_diamond_samples),
         q_max_precompute=int(args.q_max_precompute),
         q_lazy_cache=int(args.q_lazy_cache),
     )
@@ -242,16 +238,18 @@ def main() -> None:
     print(f"Knot nodes: {knot_nodes}")
 
     detector_layer = int(args.detector_layer)
+    if detector_layer < 0 or detector_layer >= int(args.layers):
+        raise ValueError(f"--detector_layer must be in [0, layers-1]. Got {detector_layer} with layers={args.layers}.")
+
     max_reach, det_reach = _reachability_summary(rawG, knot_nodes, layer_size, detector_layer)
     print(f"[Topology Check] Max reachable layer from knot (ignoring dynamics): {max_reach}")
     print(f"[Topology Check] Detector layer {detector_layer} reachable in principle? {det_reach}")
 
     x = excite_state(world, knot_nodes, mode=str(args.excite), vacuum=int(args.vacuum), seed=int(args.seed) + 999)
 
-    rng = np.random.default_rng(int(args.seed) + 2024)
-
-    # For sequential mode, build schedule context once
+    # sequential mode needs a schedule on condensation SCCs
     ctx = ScheduleContext.from_world(world)
+    rng = np.random.default_rng(int(args.seed) + 2024)
     fixed_sched = random_topological_order(ctx.condensation.dag, rng) if args.fixed_schedule else None
 
     records = []
@@ -277,7 +275,8 @@ def main() -> None:
             det_count = 0
             det_ge = 0
 
-        max_depth_seen = max(max_depth_seen, active_max)
+        if active_max > max_depth_seen:
+            max_depth_seen = active_max
         if first_hit is None and active_max >= detector_layer:
             first_hit = t
 
@@ -297,7 +296,7 @@ def main() -> None:
             )
         )
 
-        # optional kick
+        # Optional impulse
         if int(args.kick_tick) >= 0 and t == int(args.kick_tick):
             kk = max(1, int(round(float(args.kick_frac) * len(knot_nodes))))
             kick_nodes = rng.choice(knot_nodes, size=kk, replace=False).tolist()
@@ -306,11 +305,11 @@ def main() -> None:
                 if kA > 1:
                     x[v] = int(rng.integers(0, kA))
 
+        # Advance
         if t < int(args.steps):
             if args.update_mode == "synchronous":
-                x = _tick_update_synchronous(world, x)
+                x = tick_update_synchronous(world, x)
             else:
-                # sequential SCC sweep
                 sched = random_topological_order(ctx.condensation.dag, rng) if (not args.fixed_schedule) else fixed_sched
                 assert sched is not None
                 x = tick_update(world, x, sched, ctx.condensation)
@@ -326,9 +325,12 @@ def main() -> None:
         print(f"Detector layer {detector_layer}: NOT reached.")
     else:
         print(f"Detector layer {detector_layer}: first reached at tick {first_hit}.")
-
     if args.update_mode == "sequential":
-        print("Note: sequential mode can propagate multiple layers within one tick (SCC sweep).")
+        print("NOTE: sequential mode allows propagation along the condensation DAG within a single tick.")
+        print("      If you see 'first reached at tick 1', switch to --update_mode synchronous for finite-speed propagation.")
+    else:
+        print("Tip: If propagation stalls early, increase p_forward or layer_size, or add small p_skip.")
+        print("     For threshold rules, lower threshold or increase in-degree.")
 
 
 if __name__ == "__main__":

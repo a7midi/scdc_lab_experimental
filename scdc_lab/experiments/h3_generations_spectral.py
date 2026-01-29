@@ -16,6 +16,28 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+def _unpack_swap_result(res, fallback_graph):
+    """Handle multiple implementations of *double_edge_swap utilities.
+
+    Some versions return:
+      - H
+      - (H, swaps_done)
+      - (H, swaps_done, tries, ...)
+      - None (in-place modification)
+    """
+    if res is None:
+        return fallback_graph, None
+    if isinstance(res, (tuple, list)):
+        if len(res) == 0:
+            return fallback_graph, None
+        H = res[0]
+        swaps_done = None
+        if len(res) > 1 and isinstance(res[1], (int, np.integer)):
+            swaps_done = int(res[1])
+        return H, swaps_done
+    return res, None
+
+
 from ..graphs import er_directed_multigraph, layered_random_dag
 from ..diagnostics import directed_double_edge_swap, frozen_depth_labels_from_condensation, depth_preserving_double_edge_swap
 from ..spectral import generation_band_test
@@ -69,14 +91,18 @@ def main() -> None:
     # Degree nulls
     report["deg_nulls"] = []
     for i in range(int(args.n_null)):
-        H, swaps_done = directed_double_edge_swap(G, n_swaps=n_swaps, seed=int(args.seed) + 1000 + i)
+        G0 = G.copy()
+        res = directed_double_edge_swap(G0, n_swaps=n_swaps, seed=int(args.seed) + 1000 + i)
+        H, swaps_done = _unpack_swap_result(res, G0)
         report["deg_nulls"].append(summarize_test(f"deg_null_{i}", generation_band_test(H, random_state=int(args.seed) + 1000 + i)))
 
     # Depth nulls
     frozen_depth = frozen_depth_labels_from_condensation(G)
     report["depth_nulls"] = []
     for i in range(int(args.n_null)):
-        H, swaps_done = depth_preserving_double_edge_swap(G, frozen_depth=frozen_depth, n_swaps=n_swaps, seed=int(args.seed) + 2000 + i)
+        G0 = G.copy()
+        res = depth_preserving_double_edge_swap(G0, frozen_depth=frozen_depth, n_swaps=n_swaps, seed=int(args.seed) + 2000 + i)
+        H, swaps_done = _unpack_swap_result(res, G0)
         report["depth_nulls"].append(summarize_test(f"depth_null_{i}", generation_band_test(H, random_state=int(args.seed) + 2000 + i)))
 
     report["n_swaps"] = int(n_swaps)

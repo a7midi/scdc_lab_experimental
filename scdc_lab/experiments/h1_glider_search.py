@@ -89,13 +89,7 @@ def build_world(
         if n % layers != 0:
             raise ValueError(f"For layered graphs require n divisible by layers. Got n={n}, layers={layers}.")
         layer_size = n // layers
-        G = layered_random_dag(
-            n_layers=layers,
-            layer_size=layer_size,
-            p_forward=p_forward,
-            p_skip2=p_skip,
-            seed=seed
-        )
+        G = layered_random_dag(n_layers=layers, layer_size=layer_size, p_forward=p_forward, p_skip=p_skip, seed=seed)
         knot_nodes = _pick_knot_nodes_layered(layers, layer_size, knot_k, rng, knot_layer=knot_layer)
     else:
         raise ValueError("--graph_type must be one of: er, layered")
